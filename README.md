@@ -10,6 +10,9 @@ I built this after realizing that **QQ Music does not support Android Auto**, wh
 
 > Note: I had little prior Android app experience. To accelerate development, part of the **phone playback UI** was adapted from the open-source project **Booming Music** (see Credits). If any usage violates the original license, please contact me and I will promptly fix or remove the relevant code.
 
+Download latest prebuilt APKs:
+- 📦 NuomiPlayer 2.0: https://github.com/charlottejas/NuomiPlayer/raw/main/糯米播放器2.0.apk
+
 ## Disclaimer
 
 This project is for **personal learning and research** only.  
