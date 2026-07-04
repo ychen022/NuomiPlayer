@@ -84,7 +84,7 @@ public class NcmLyricsHelper {
         rawData.put("os", "pc");
         rawData.put("lv", "-1");
         rawData.put("kv", "0");
-        rawData.put("tv", "0");
+        rawData.put("tv", "-1");
         rawData.put("rv", "0");
         rawData.put("yv", "0");
         rawData.put("ytv", "0");
