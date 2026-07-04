@@ -22,5 +22,7 @@ dependencies {
     implementation libs.remotecallback
     annotationProcessor libs.remotecallback.processor
     implementation "androidx.media:media:1.6.0"
+    // Needed by MyMusicService for NotificationCompat (launch-hint notification).
+    implementation "androidx.core:core:1.13.1"
 
 }
