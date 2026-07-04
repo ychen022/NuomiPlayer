@@ -101,6 +101,12 @@ public class MyMusicService extends MediaBrowserServiceCompat {
     private String lastNcmMediaId;
     private String ncmFetchedLyrics;
 
+    // Simultaneous translated-lyric display (ported from upstream PR #13).
+    private String ncmFetchedTranslation;
+    private String lastTranslationRaw;
+    private final List<Pair<Long, String>> parsedTranslation = new ArrayList<>();
+    private boolean hasTranslation = false;
+
     // Local playback clock used to advance lyrics smoothly between remote updates.
     private long basePosMs;
     private float baseSpeed;
@@ -196,6 +202,10 @@ public class MyMusicService extends MediaBrowserServiceCompat {
                 lastNcmMediaId = null;
                 lastLyricsRaw = null;
                 parsedLyrics.clear();
+                ncmFetchedTranslation = null;
+                lastTranslationRaw = null;
+                parsedTranslation.clear();
+                hasTranslation = false;
 
                 if (!isNcmMode || isNcmSource) {
                     Log.i(TAG, isNcmSource
@@ -234,7 +244,7 @@ public class MyMusicService extends MediaBrowserServiceCompat {
             // of calling mirror(...) directly. MediaControllerCompat.registerCallback
             // does NOT replay the current metadata, and the old direct-mirror path
             // never invoked onMetadataChanged — so for NetEase it never kicked off
-            // the asynchronous LyricFetcher.fetch() for the *currently* playing
+            // the asynchronous NetEase lyric fetch for the *currently* playing
             // song, and never populated lastRemoteMeta/lastRemoteState. As a result
             // ncmFetchedLyrics stayed null and lyrics rendered blank until the user
             // manually skipped to the next track (the first real metadata change).
@@ -292,6 +302,72 @@ public class MyMusicService extends MediaBrowserServiceCompat {
             }
         }
         Log.i(TAG, "parsed " + parsedLyrics.size() + " lyric lines");
+    }
+
+    private void parseTranslation(String raw) {
+        parsedTranslation.clear();
+        Pattern p = Pattern.compile("\\[(\\d{1,2}):(\\d{2}(?:\\.\\d{2,3})?)\\](.*)");
+        for (String line : raw.split("\n")) {
+            Matcher m = p.matcher(line);
+            if (m.find()) {
+                long t = (long) ((Integer.parseInt(m.group(1)) * 60
+                        + Float.parseFloat(m.group(2))) * 1000f);
+                String text = m.group(3).trim();
+                if (!text.isEmpty()) {
+                    parsedTranslation.add(new Pair<>(t, text));
+                }
+            }
+        }
+    }
+
+    /** Returns the translated line active at {@code pos} (ms), or null. */
+    private String getTranslationAt(long pos) {
+        if (parsedTranslation.isEmpty()) {
+            return null;
+        }
+        int lo = 0;
+        int hi = parsedTranslation.size() - 1;
+        int idx = -1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >> 1;
+            if (parsedTranslation.get(mid).first <= pos) {
+                idx = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return idx >= 0 ? parsedTranslation.get(idx).second : null;
+    }
+
+    /**
+     * Heuristic used to decide whether to show a translation alongside a line:
+     * returns true for Chinese/English lines (translation not needed), and false
+     * when the line contains Japanese kana (so its translation should be shown).
+     */
+    private boolean isChineseOrEnglish(String text) {
+        if (text == null || text.isEmpty()) {
+            return true;
+        }
+        for (char c : text.toCharArray()) {
+            Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
+            if (block == Character.UnicodeBlock.HIRAGANA
+                    || block == Character.UnicodeBlock.KATAKANA) {
+                return false;
+            }
+        }
+        for (char c : text.toCharArray()) {
+            if (Character.UnicodeBlock.of(c) == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS) {
+                return true;
+            }
+        }
+        int ascii = 0;
+        for (char c : text.toCharArray()) {
+            if (c >= 32 && c <= 126) {
+                ascii++;
+            }
+        }
+        return ascii > text.length() * 0.8;
     }
 
     private void addLyricsButton(PlaybackStateCompat.Builder builder) {
@@ -361,9 +437,22 @@ public class MyMusicService extends MediaBrowserServiceCompat {
                 }
             }
             currentLine = idx < 0 ? "" : parsedLyrics.get(idx).second;
-            int next = idx + 1;
-            if (next < parsedLyrics.size()) {
-                nextLine = parsedLyrics.get(next).second;
+            if (idx >= 0) {
+                String originalLine = parsedLyrics.get(idx).second;
+                // Simultaneous translation: for lines that aren't Chinese/English
+                // (e.g. Japanese), show the translation on top and the original
+                // underneath. Otherwise fall back to current-line + next-line.
+                if (hasTranslation && !isChineseOrEnglish(originalLine)) {
+                    String translatedLine = getTranslationAt(pos);
+                    currentLine = translatedLine != null ? translatedLine : originalLine;
+                    nextLine = originalLine;
+                } else {
+                    currentLine = originalLine;
+                    int next = idx + 1;
+                    if (next < parsedLyrics.size()) {
+                        nextLine = parsedLyrics.get(next).second;
+                    }
+                }
             }
         }
 
@@ -505,19 +594,42 @@ public class MyMusicService extends MediaBrowserServiceCompat {
                     ncmFetchedLyrics = null;
                     lastLyricsRaw = null;
                     parsedLyrics.clear();
+                    ncmFetchedTranslation = null;
+                    lastTranslationRaw = null;
+                    parsedTranslation.clear();
+                    hasTranslation = false;
                     Log.i(TAG, "NCM song changed, fetching lyrics for mediaId=" + mediaId);
-                    LyricFetcher.fetch(mediaId, new LyricFetcher.Callback() {
+                    NcmLyricsHelper.fetchLyrics(mediaId, new NcmLyricsHelper.LyricsCallback() {
                         @Override
-                        public void onLyricResult(String id, String lyrics) {
-                            if (id == null || !id.equals(lastNcmMediaId)) {
+                        public void onSuccess(String lyrics, String translation) {
+                            // Ignore stale results if the song changed again mid-fetch.
+                            if (!mediaId.equals(lastNcmMediaId)) {
                                 return;
                             }
                             ncmFetchedLyrics = lyrics;
+                            ncmFetchedTranslation = translation;
+                            // Parse the translation eagerly so applyLyricsOverlay can
+                            // pair each original line with its translation.
+                            parsedTranslation.clear();
+                            hasTranslation = false;
+                            if (translation != null && !translation.isEmpty()) {
+                                lastTranslationRaw = translation;
+                                parseTranslation(translation);
+                                hasTranslation = !parsedTranslation.isEmpty();
+                            }
                             Log.i(TAG, "NCM lyrics fetched: "
-                                    + (lyrics == null ? "null" : "len=" + lyrics.length()));
+                                    + (lyrics == null ? "null" : "len=" + lyrics.length())
+                                    + (hasTranslation
+                                            ? " (+translation " + parsedTranslation.size() + ")"
+                                            : ""));
                             if (isLyricsMode && lyrics != null) {
                                 applyLyricsOverlay(lastRemoteMeta);
                             }
+                        }
+
+                        @Override
+                        public void onError(String error) {
+                            Log.w(TAG, "NCM lyric fetch failed: " + error);
                         }
                     });
                 }
